@@ -10,6 +10,11 @@ indexer (LocalSearch/TinySPARQL), which is **dormant on non-GNOME** but **runs w
 3. `PACKAGING.md` — the AppImage build (on hold) and packaging gotchas.
 4. `AMAdocs-FABLE-RECOMMENDATIONS.md` — an external review / checklist.
 
+**Agent memory** — `agent-memory/` holds a snapshot of the previous Claude Code session's persistent
+memory (the distilled decision log + the `[[wikilinks]]` the docs reference). Read `agent-memory/MEMORY.md`
+as an index. To make it auto-load into your sessions, follow `agent-memory/README.md` (it copies into
+`~/.claude/projects/<slug>/memory/`, where `<slug>` is this repo's absolute path with `/`→`-`).
+
 ---
 
 ## ⚠️ FIRST: absolute paths must be rewritten
