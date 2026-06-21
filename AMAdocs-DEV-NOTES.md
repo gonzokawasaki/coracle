@@ -1,15 +1,538 @@
 # AMAdocs — Developer Notes
 
-Technical companion to `K-base.md`. Status as of 2026-06-12.
+Technical companion to `K-base.md` (overview) and `AMAdocs-SPEC.md` (product spec). This is the
+**engineering log** — newest entries on top, kept in chronological/archaeological order on purpose.
 
-## 🚧 IN PROGRESS (2026-06-19) — Phase 2 wiring (port prototype → real UI)
+**Current state (2026-06-20):** AMAdocs is the semantic file-manager UI wired end-to-end to the
+engine (live file tree, AI state chips, folder indexing, scoped chat, context-menu actions); the
+"ride on GNOME" loop and safe ingest queue are proven live; the LanceDB schema bug is fixed and the
+`teaching` table re-indexed. Three CSS skins (Terminal / Slate / Desktop) ship on top of the wired
+UI. The **background cadence scheduler is now built** (resume-on-relaunch + periodic delta tick), and
+**granite4.1:3b is blessed as the bundled default** (packaged env + summary fallback + catalog lead).
+The **sparse-index mystery is solved and fixed** (see top entry): LocalSearch was skipping every `.git`
+directory by default, so the whole `teaching_docs` vault was invisible — corpus now indexed. Preview is
+client-side (PDF.js/mammoth/SheetJS, **+ marked.js for markdown** as of 2026-06-21), decoupled from
+indexing (any local file previews from disk), and wide spreadsheets/markdown no longer bleed off the page. The app now **opens to a live status doc** (index/db/model/version). The **GNOME
+extraction blind spots are now backstopped** (top entry): docx/xlsx/pptx that GNOME mis-routes, scanned
+PDFs, and images now run through AMAdocs' own collector extractors and embed — folder sync handles office
+docs + scanned PDFs automatically, right-click "analyse with AI" handles images (OCR + vision) on demand.
+The **`p.N` citation label** is now restored for backstop PDFs (carry `asPDF`'s page ranges) and the
+**dryRun over-count is fixed** (empty-text files route to the backstop instead of being phantom-counted)
+— both 2026-06-21, verified live. The top-left **window-style dots are now real Home/Back/Forward nav
+buttons** and the launch surface is a proper **Homepage** (status cards + indexed-folders + quick actions),
+not the old read-only markdown status — both 2026-06-21, verified live in the Electron app. Open:
+**packaging** only (stale AppImage, icon, Windows/macOS). The "Phase 1 / Phase 2" labels below are
+historical build-stage names — the product is just AMAdocs now.
 
-Building the Phase 2 "semantic file manager" UI per `AMAdocs-PHASE2.md`, staged in 4 stages
-(A–D), each with a working checkpoint + a doc/memory update before moving on. Steps 1–2 (IPC
-`read-dir`/`home-path` in `main.js`; `readDir`/`homePath` on `window.amadocs` in `preload.js`)
-were already done. Source of truth = `tooling/amadocs-ui/index.html`, `cp`'d to
-`amadocs-desktop/ui/index.html` after each change. Phase 1 UI backed up at `index.phase1.html`
-in both locations. **Stages A, B, C done; Stage D (REPL chat + context-menu actions) is next.**
+## ✅ DONE (2026-06-21) — Preview polish: markdown rendering + spreadsheet/markdown bleed fix
+
+Three fixes to the document preview pane (`renderXlsxInto` / new `renderMarkdownInto`, and the
+`.vsheet-page` family in `ui/index.html`), all verified live over CDP in the running Electron app:
+
+- **`.md` files now render as formatted markdown** (were showing as raw source). Vendored **marked.js
+  v12.0.2** (MIT, ~35 KB) into `ui/vendor/` (+ `tooling/amadocs-ui/vendor/`), alongside PDF.js/mammoth/
+  SheetJS — fully offline, nothing fetched at runtime. New `renderMarkdownInto()` parses GFM (tables,
+  task lists, fenced code) into a `.vsheet-page.md-body`, with a plain-text fallback if marked ever
+  fails to load. Wired into all three dispatch paths: `renderFromDisk` (off-disk, by `.md/.markdown/
+  .mdown/.mkd` ext or `text/markdown` mime), `renderOriginalInto` (indexed docs, by mime/docpath), and
+  the citation-jump path. New `.md-body` CSS themes headings/lists/checkboxes/code/blockquotes/tables
+  with the existing page CSS variables.
+- **Wide spreadsheets no longer bleed off the page** (original report). `.vsheet-page.is-xlsx` is now a
+  definite, content-independent width (`calc(100% - 2rem); max-width:64rem`) and each sheet's table is
+  wrapped in `.xlsx-sheet { overflow-x:auto }`, so a too-wide grid scrolls **inside** the page instead
+  of spilling past its right edge.
+- **Wide markdown bleed (code blocks + tables)** got the same treatment: `.md-body` is given a definite
+  width with `min-width:0` so wide children can't stretch the page via flex `min-content` sizing; `pre`
+  is capped at `max-width:100%` with `overflow-x:auto`, and `table` uses `display:block; width:max-
+  content; max-width:100%; overflow-x:auto` (the GitHub approach) to become its own horizontal scroll
+  area. Long words/URLs wrap via `overflow-wrap:break-word`. **Root cause** (both md + xlsx): the fixed
+  paper width didn't hold because flex `min-content` let content widen the page — the cure is a definite
+  page width plus children capped at `max-width:100%` with internal scroll.
+
+**Verified live:** README.md → formatted (h1/lists), DEV-NOTES.md → `pageBleeds:false` with the 1746 px
+`pre` and 1955 px `table` scrolling internally; a wide grades `.xlsx` → page within the desk, table
+scrolls inside. **Follow-up idea noted** (not built): opt-in per-mime preview renderers surfaced on the
+Homepage — code viewer (syntax highlighting) for programmers, video player for filmmakers, etc.
+
+## ✅ DONE (2026-06-21) — Browser-style UI zoom (Ctrl +/−/0 + Ctrl+wheel)
+
+Zoom was effectively fixed: the window hides the native menu bar (`win.setMenuBarVisibility(false)`),
+so the default View-menu zoom accelerators never ran and nothing drove Chromium's page zoom. Wired it
+directly on the window's `webContents` in **`amadocs-desktop/main.js`** (new `setupZoom(win)`, called in
+`createWindow` right after `setMenuBarVisibility`):
+- **Keyboard** via `before-input-event`: Ctrl/Cmd + `+`/`=` (zoom in), `-`/`_` (out), `0` (reset). The
+  handler calls `event.preventDefault()`, which also suppresses any default-menu zoom role → no
+  double-stepping.
+- **Ctrl + mouse wheel** via the `zoom-changed` event: Chromium applies the step, we clamp + resync the
+  cached factor so the keyboard path continues from wherever the wheel left off.
+- Clamped **0.5×–3.0×** in 0.1 steps (`clampZoom`); a `did-finish-load` handler **re-applies the factor
+  after each load** (the loading.html → ui/index.html navigation otherwise resets it).
+- Page zoom scales the **whole renderer** — the DOM context menus, the Homepage, file previews — which is
+  what "zoom the menus" needs.
+
+**Scope:** Electron-only (correct — the browser dev-stack already has native browser zoom). **Session-only:**
+factor lives in memory, resets to 100% on restart; persisting across launches (write to a settings file)
+is an easy follow-up, not done.
+
+**Verified live (2026-06-21):** user confirmed Ctrl + zooms the UI in the running app. (Automated check
+was inconclusive — CDP-injected synthetic keystrokes don't reliably reach Electron's `before-input-event`;
+a temporary instrumented build proved `setZoomFactor` itself moves `devicePixelRatio`/`innerWidth` and that
+the handler fires, then the human keypress settled it. Instrumentation removed; `node --check` clean.)
+
+## ✅ DONE (2026-06-21) — Strong-contrast pass on all three themes (faint text/boxes fixed)
+
+User feedback: text and boxes were too faint against the background — "go for strong, not subtle, on all
+items." Everything in the UI inherits from the per-theme CSS custom properties, so the fix was at the
+variable layer (propagates to every box + text item at once). Edited **`tooling/amadocs-ui/index.html`**
+(source of truth) → synced identical to **`amadocs-desktop/ui/index.html`**. All three themes
+(**dark**/default, **light**, **slate**):
+- **Text** pushed toward max contrast: `--text`, `--text-muted`, `--text-faint`, and the near-invisible
+  `--text-xfaint` (was a 0.40–0.45-alpha ghost → now a solid value).
+- **Boxes:** `--border` strengthened dramatically (the main culprit for "faint boxes"); `--bg-hover`/
+  `--bg-desk`/`--bg-sel` lifted for clearer panel separation; `--scrollbar-thumb` matched to the border.
+- **Badges** (file-type chips): fill alpha ~doubled (0.10–0.16 → 0.20–0.30) with brighter fg.
+- **Accents** (green/blue/amber/red) brightened a notch so links/"Connected ●"/warnings stand out.
+- **Paper sheet** (Homepage + doc view render on a white `--page-bg`): darkened the fixed faint colours
+  `.p-eye`/`.p-sub`/`.p-folio` + the shared `--page-faint`/`--page-p`/`--page-rule` for contrast on white.
+
+Left intentionally faint: `.nav-btn:disabled { opacity:0.35 }` — that's the deliberate "Back/Forward
+disabled at history ends" affordance. All changes are value swaps inside existing declarations (no
+structural CSS change).
+
+## ✅ DONE (2026-06-21) — Homepage v1 + Home/Back/Forward nav buttons
+
+Two linked pieces of the "lean on the homepage instead of menus" direction. **Lean v1 — we add cards/actions
+as the product grows.**
+
+**Top-bar nav (replaces 3 dead dots).** The top-left `.topbar__dot` spans looked like macOS traffic-lights
+and did nothing. Replaced with three wired buttons (`.nav-btn`): **⌂ Home / ‹ Back / › Forward**. Backed by a
+browser-style history stack (`navHist = {stack, idx, replaying}`) over the three middle-panel destinations
+(Home status doc / folder / file preview). The trick: the three destination fns (`showStatusDoc` / `selectFolder`
+/ `showFilePreview`) each call `pushHist()` up top, so **every** path into them is captured automatically without
+touching each call site; Back/Forward replay via `navDispatch` with `replaying=true` so the replay doesn't
+re-record, and re-selecting the same place is de-duped (`navEq`). Boot resets the stack after `initFileTree`
+(which calls `selectFolder(home)` for its side-effects) so **Home is the history root** (Back disabled on first
+load). `updateNavButtons()` toggles the disabled state at the ends.
+
+**Homepage (repoints `showStatusDoc`).** The old launch surface rendered the server markdown read-only via
+`renderStatusMd` (now unused but left in place; the on-disk `AMADOCS-STATUS.md` artifact still generates).
+`showStatusDoc` now renders a structured HTML homepage (`renderHomeHtml`) inside the `.vsheet-page` paper sheet:
+hero (◆ AMAdocs · version · tagline · generated-time + refresh), a 4-card status grid (**Index** GNOME
+connected? · **Library** docs · workspaces · **Model** chat · provider · **Engine** version · Node · vectorDb),
+an **Indexed folders** list (or empty-state hint), and **Quick actions** — three wired buttons:
+`🗂 Browse my files` (`desktop.homePath`→`selectFolder`), `＋ Index a folder…` (`desktop.pickFolder`→`selectFolder`
+→`onSyncFolder`), `⟳ Refresh status`. Active tab label is now `⌂ Home` (was `◆ AMAdocs Status`).
+
+**Engine — `server/endpoints/workspaces.js`:** renamed `buildAmadocsStatusMarkdown()` → `buildAmadocsStatus()`,
+which now computes a structured `data` object (engine/model/gnome/library/synced) **and** derives the markdown
+from the same values, returning `{ markdown, data }`. The `/amadocs-status` endpoint serves both (`data` feeds
+the homepage; `markdown` still writes the on-disk file + stays back-compat). No new data gathered — just exposed.
+
+**Verified live (2026-06-21)** — real dev stack (server :3001 reloaded via nodemon, collector :8888, ollama),
+Electron app (`--no-sandbox --remote-debugging-port=9222`, driven via `tooling/cdp.js`):
+- `/api/amadocs-status` returns `data` (GNOME connected, 784 docs / 3 ws, granite4.1:3b, 1 synced folder).
+- Clean page load lands on Home and **stays** (`navHist.stack ["home"], idx 0`); 4 cards + 3 actions + the synced
+  folder all render from the live payload (screenshot `tooling/logs/homepage.png`).
+- Back/Forward flow proven: Home → `🗂 Browse my files` (Back on, Fwd off) → `navBack` to Home (Back off, Fwd on)
+  → `navForward` to the folder. Disabled-state toggling correct at both ends.
+- `node --check` (workspaces.js) + `vm.Script` over both inline UI scripts: 0 failures. Source synced
+  `tooling/amadocs-ui/index.html` → `amadocs-desktop/ui/index.html` (identical).
+
+**Cosmetic nits left open:** (1) hero reads "◆ AMAdocs**v1.14.0**" with no space before the version chip — a
+margin tweak. (2) The version shown (`v1.14.0`, Node 22) is the **AnythingLLM engine** version, not an AMAdocs
+product version — surface a real product version when one exists.
+
+## ✅ DONE (2026-06-21) — Preview decoupled from indexing: any local file previews from disk
+
+Previously `showFilePreview()` only rendered a file if it was in `docIndex` (i.e. already embedded);
+every un-indexed file hit the "Right-click → analyse with AI" placeholder. That conflated two distinct
+things — **preview** ("let me see this file") and **indexing** ("make it searchable"). The renderers
+(`renderPdfInto`/`renderImageInto`/`renderDocxInto`/`renderXlsxInto`) already operate on a `Blob`; the
+only reason preview needed an index was that bytes were fetched via the engine's `doc-original?path=
+<docpath>` (and a docpath only exists post-index). The Electron bridge had no filesystem-read, so the
+UI had no other way to get the bytes. Fixed by adding one:
+
+- **`amadocs-desktop/main.js`** — `read-file` IPC handler: `fs.readFile` → `{ok, data:<base64>, mime}`.
+  Path-guarded (string + `isFile()`), **size-capped at 100 MB** (`too-large` error), ext→mime via a
+  `PREVIEW_MIME` map (default `application/octet-stream`).
+- **`amadocs-desktop/preload.js`** — exposes `readFile(path)` on `window.amadocs`.
+- **`tooling/amadocs-ui/index.html`** (→ cp `amadocs-desktop/ui/`):
+  - `renderFromDisk(container, fsPath, name)` — reads bytes off disk, builds a `Blob`, dispatches by
+    mime exactly like `renderOriginalInto` (PDF/image/docx/xlsx·csv), `text/*`+json → new
+    `renderBlobTextInto` (blob `.text()` → escaped via `renderDocText`; `renderTextInto` couldn't be
+    reused — it needs a docpath/engine), unknown binary → "no built-in preview" note.
+  - `showFilePreview` — when not indexed but `desktop.readFile` exists → `renderFromDisk` (else the old
+    placeholder, for the browser dev stack with no bridge).
+  - `renderImageInto` — `if(!docpath) return;` after appending the image, so an un-indexed image shows
+    raw (no bogus `doc-view?path=null` caption fetch).
+  - Not-indexed summary card now reads "Not yet indexed — previewing from disk. Right-click → analyse
+    with AI to make it searchable." (preserves the indexing discoverability the placeholder used to carry).
+
+**Net UX:** preview works on **any** local file regardless of index state; indexing (caption/OCR/search)
+stays opt-in. Slightly shifts the old "you must index to interact" model — intentional, user-approved.
+
+**Verified live (2026-06-21)** — relaunched Electron (main-process change → full restart), CDP-driven:
+`window.amadocs.readFile` present; a non-indexed `.txt` (`Design prompt for AI design.txt`) → renders
+2,428 chars from disk (not the placeholder); a non-indexed PDF (`0500_m20_in_12.pdf`, a Cambridge IGCSE
+paper) → **8 PDF.js canvases rendered straight from disk**, metastrip `indexed pending`, summary card
+shows the new hint (screenshot `tooling/logs/disk-preview-pdf.png`). Zero console/server errors. Parse
+checks: `node --check` on main.js + preload.js, vm.Script over both inline UI scripts (0 failures).
+
+## ✅ DONE (2026-06-21) — `p.N` citation labels for backstop PDFs (carry asPDF's page ranges)
+
+Closed the "cosmetic `p.N` citation label for bridged docs" open item — **scope: backstop PDFs only**
+(user-chosen Option A; the cheap, zero-regression half). Background: a citation chip shows `p.N` by
+mapping the cited chunk's char-offset into a `pages` array (`[{page,start,end}]`) via the UI's
+`matchPage()`. Normal collector PDFs build that array in `asPDF` (`collector/.../asPDF/index.js:44`);
+bridged docs lost it. There are two bridged cases — **collector-backstop PDFs** (scanned / OCR'd /
+empty-text), where `asPDF` *already computes* `pages` but `materializeViaCollector`→`buildDoc` **threw
+it away**; and **GNOME-text PDFs** (`tinysparql`), where TinySPARQL hands us flat text with no page
+boundaries (would require re-parsing the PDF — deliberately **not** done, to keep ride-on-GNOME intact).
+
+**Fix (`server/utils/GnomeBridge/index.js`, ~5 lines):**
+- `buildDoc(meta, text, source, pages = null)` — new `pages` param; emits `pages: Array.isArray(pages)
+  ? pages : []`. It's a **disk-only doc-JSON field** read by `doc-view` (`endpoints/workspaces.js:1490`),
+  **not** part of the LanceDB metadata schema (`withAmadocsSchema` only forces amadocsSource/sourceMime/
+  sourcePath/pageCount/aiSummary) — so pages-bearing and page-less docs mix freely in one workspace
+  (normal asPDF uploads already do). `[]` for GNOME flat text → `matchPage` returns null → chip shows no
+  label, passage highlight unaffected.
+- `materializeViaCollector` — reads `doc = res.documents[0]` and passes `doc.pages` into `buildDoc`. Since
+  `backstopFile` (the right-click "analyse with AI" path) also routes through `materializeViaCollector`,
+  on-demand analysed PDFs get labels too. Non-PDF extractors (mammoth/xlsx) omit `pages` → `[]`, correct
+  (no page concept).
+
+**Verified live (2026-06-21)** — real dev stack (server :3001 + collector :8888, granite, native ONNX
+embedder) + the Electron app (`--no-sandbox --remote-debugging-port=9222`, driven via `tooling/cdp.js`):
+1. Real gnome-sync drained the two newly-routed blind spots; the **83-page** scanned/OCR'd `Year 6 ICT
+   Translated KNTT…pdf` embedded with a full `pages` array (83 ranges, 0→135969 chars = pageContent len).
+2. `doc-view` serves all 83 ranges.
+3. A scoped `stream-chat` against that PDF returned 4 sources; the **UI's own `matchPage`** resolved them
+   to **p.11 / p.18** (Python port + then live in-app).
+4. **In the Electron renderer:** the file-scoped REPL rendered citation chips labelled **`p.11` / `p.18`**;
+   clicking `p.11` jumped the PDF preview to page 11 with the passage highlighted (screenshot
+   `tooling/logs/citation-pN.png`). Server log clean (no errors). GNOME-text PDFs still show no label, by
+   design.
+
+## ✅ DONE (2026-06-21) — dryRun over-count fixed: empty `plainTextContent` files no longer phantom-counted
+
+Closed follow-up (1) from the "OBSERVED — cadence loop verified live" entry below: a `dryRun`
+gnome-sync's `indexed`/`queued` counted files the real embed path skips, so the preview didn't match
+what executed. Root cause (confirmed live on this box against `…/teaching_docs/ICT_MOET`): GNOME
+sometimes stores an **empty-string** `nie:plainTextContent` for a file it mis-routed (here an `.xlsx`
+and a scanned `.pdf`). Those files have the triple, so `queryFileList` matched them (24 rows) — but
+`materialize`→`fetchText` returns `""` → `if (!text.trim()) return null` → they never embed (real
+sync held at 22). And they were **also** excluded from `queryBlindSpots`, which used a bare
+`FILTER NOT EXISTS { plainTextContent }` — the empty triple *exists*, so NOT EXISTS was false. Net:
+counted-but-never-embedded phantoms, falling through **both** queries.
+
+**Fix (2 SPARQL filters, `server/utils/GnomeBridge/index.js`):**
+- `queryFileList` — added `FILTER(STR(?t) != "")` so it returns only **genuinely text-bearing** gnome
+  files (24 → 22). dryRun's gnome-text count now matches what `materialize` actually embeds.
+- `queryBlindSpots` — changed `FILTER NOT EXISTS { ?ie nie:plainTextContent ?anytext }` →
+  `FILTER NOT EXISTS { ?ie nie:plainTextContent ?anytext . FILTER(STR(?anytext) != "") }`, so
+  "no *usable* text" fires on empty-string text too. The 2 empty-text files (both backstop exts) now
+  route to the **collector backstop** (officeparser for the xlsx, OCR for the scanned PDF) instead of
+  vanishing — strictly better than just correcting the count: they actually embed now.
+
+**Verified (2026-06-21)** — `node --check` passes; the exported query fns run directly against the live
+LocalSearch daemon over D-Bus (no server/DB needed): on ICT_MOET, `queryFileList` 24→**22**,
+`queryBlindSpots` 3→**5** (now incl. `ict_quiz_SA2.xlsx` + `Year 6 ICT…schools.pdf`), dryRun
+`indexed` = **27, all with a real extraction path**. Probe confirmed exactly 2 files there carry an
+empty `plainTextContent` — the two now reclassified. The delta/state/cap machinery is untouched (the
+queries feed `current` the same way). Remaining inherent optimism: a scanned PDF whose OCR yields
+nothing is still counted in `queued` — unavoidable without running the collector in dryRun.
+
+## ✅ DONE (2026-06-20 PM) — Collector backstop: GNOME's extraction blind spots now embed (docx + OCR/vision)
+
+Closed the long-standing "ride on GNOME inherits GNOME's silent blind spots" gap (the docx/scanned-PDF/
+image holes flagged repeatedly below). The sync path only ever embedded files GNOME had already extracted
+text for (`nie:plainTextContent`), so **docx/xlsx/pptx that GNOME's OOXML extractor mis-routes** (the
+WPS-mime sniffing bug — 175 recorded `"Document must begin with an element <book>"` failures on this box),
+**scanned/image-only PDFs**, and **images** were invisible. This was also why right-click **"analyse with
+AI" on an image was a dead end** — `ctxAnalyse` needed a `docpath`, but images are excluded from bulk
+index and had no ingest route to ever get one. **Both were one root cause:** AMAdocs' own collector
+extractors (`asDocx`→mammoth/officeparser, `asPDF`→OCR fallback `ocrPDF`, `asImage`→OCR + moondream
+caption) existed but were never called from the sync path. Fix reuses them wholesale — **no new
+extraction code.**
+
+**Design split (user-chosen):** office docs (docx/xlsx/pptx) + scanned PDFs are backstopped
+**automatically during folder ⟳ sync / cadence**; images are **on-demand only** via right-click
+(vision captioning is heavy — keep it opt-in, matching the existing `⚡ analyse` UI for images).
+
+**Engine — `server/utils/GnomeBridge/index.js`:**
+- `buildDoc(meta, text, source)` — new `source` param tags `amadocsSource:"collector-backstop"` (vs the
+  default `"tinysparql"`); both are flat text served in place via `doc-original`'s `sourcePath` fallback.
+- `queryBlindSpots({folder,exclude})` — sibling of `queryFileList` but `FILTER NOT EXISTS { ?ie
+  nie:plainTextContent ?t }` + a backstop-extension filter (`.docx/.xlsx/.pptx/.doc/.xls/.ppt/.pdf` —
+  images deliberately NOT in bulk). Same `GROUP BY ?u + MAX(?m)` double-row guard.
+- `materializeViaCollector(slug, url)` — runs `CollectorApi.parseDocument(name, {absolutePath})`
+  (parse-only; `processSingleFile` honours `absolutePath`+`parseOnly` → **never trashes/stashes the
+  user's real file**), takes `documents[0].pageContent`, builds the doc via `buildDoc(…, "collector-
+  backstop")`. Falls back to `EXT_MIME` when GNOME has no node for the file.
+- `runSync` folds blind spots into `current` = `queryFileList` ∪ `queryBlindSpots` via a `sourceByUrl`
+  map; the EXECUTE loop dispatches `materialize` (gnome text) vs `materializeViaCollector` (collector).
+  The whole delta/state/cap/finalize-on-confirm machinery + THE #1 RULE stay unchanged.
+- `backstopFile(slug, fsPath, {userId})` — on-demand single-file path (accepts images too). **Idempotent
+  by sourcePath:** removes any existing same-path workspace doc (via `Document.forWorkspace` →
+  `removeDocuments`) before embedding, so re-analysing never leaves duplicate vectors. Clears the STOP
+  pause (user-driven), and records office/PDF files that live under a synced folder into that folder's
+  state (matching url) so the cadence won't re-embed them.
+
+**Engine — `server/endpoints/workspaces.js`:**
+- `POST /workspace/:slug/analyse-file { path }` — thin wrapper over `backstopFile` (mirrors the
+  `gnome-sync` wrapper). The right-click "analyse with AI" path for images / image-only PDFs.
+- Generalized the `doc-original` in-place fallback from `amadocsSource === "tinysparql"` →
+  `amadocsSource && sourcePath`, so backstop docs are first-class for preview + the citation loop.
+
+**UI — `tooling/amadocs-ui/index.html` (source of truth) → `cp` `amadocs-desktop/ui/index.html`:**
+- `analyseFile(entryPath)` helper (`POST …/analyse-file`).
+- `ctxAnalyse` rewired: if the file already has a `docpath` → existing `deepSearchDoc` ("re-analyse");
+  **else → `analyseFile()`** (was a dead-end toast). Both branches got a `setTimeout(refreshAiState,
+  4000)` follow-up so the chip/dot reliably flips (the workspace doc list lags the embed by a beat).
+
+**⚠️ Bug found + fixed mid-verify — duplicate vectors when on-demand + cadence both hit one file.** A
+manual `analyse-file` and a cadence sync both embedded the same docx (the on-demand path had no dedup),
+leaving two workspace docs for one `sourcePath`. Fix = the sourcePath-idempotency in `backstopFile`
+above; re-analysing now collapses any duplicates to one. (Narrow residual: a special-char path where
+`pathToFileUrl`'s encoding differs from GNOME's url could miss the state-dedup and let the cadence
+re-embed once — self-heals on the next analyse.)
+
+**Verified live (2026-06-20 PM) on this GNOME box** — real engine (granite, native ONNX embedder,
+collector), driven by curl + CDP (`tooling/cdp.js`) against the running Electron app:
+- **docx:** `…/ICT_MOET/VTA_Term3_week1_10_MrKieron_ICT.docx` (a recorded GNOME `<book>` failure) →
+  mammoth extracted **5,352 words / 37,009 chars** → embedded; scoped `stream-chat` answered "the teacher
+  is Kieron ODonnell" with **all sources attributed to that docx** (scopePath pre-filter working).
+- **image:** right-click → "analyse with AI" on a fresh `.jpeg` flipped its chip **`⚡ analyse → ✓ deep`**
+  (dot on) in ~12s in the live renderer, via the real `ctxAnalyse` handler.
+- **doc-original** streams backstop docx (122 KB) + image (2.8 MB) in place (HTTP 200, correct MIME).
+- **No duplicates:** dedup collapsed a 2→1 dup and a re-sync didn't re-create it — **0 duplicate
+  sourcePaths workspace-wide** (28 docs / 28 unique paths).
+- **dryRun** on ICT_MOET now *sees* the blind spots (`indexed` 24→27); they embed for real instead of
+  being phantom-queued.
+
+**⚠️ Caveats:** (1) ~~**moondream is NOT pulled on this box** (only granite) → image *captioning* is
+skipped; only OCR text lands.~~ **RESOLVED 2026-06-20:** `moondream:latest` (1.7 GB) pulled; captioning
+live. Re-verified end-to-end via the `VisionCaption` module against `tooling/test-docs/test-graphic.png`
+(model `moondream`, basePath `http://127.0.0.1:11434`, 334-char caption — correctly read the yellow
+circle / green rectangle / red triangle / blue sky). For good photo/diagram/whiteboard search this is now
+on by default; a fresh box still needs `ollama pull moondream`. (2)
+`removeDocuments` leaves orphan document-JSON files under `storage/documents/gnome-<slug>/` (harmless —
+not workspace docs, no vectors). (3) The dryRun text-less over-count (below) is still open — but it now
+over-reports *less*, since the blind-spot office/PDF files it counts genuinely embed.
+
+## 🔎 OBSERVED (2026-06-20 PM) — cadence loop verified live; dryRun `queued` over-counts text-less files
+
+Booted the dev stack (server :3001 + collector :8888; the upstream React frontend :3000 fails with
+`cross-env: not found` — not installed, and we don't ship it, so benign) and the Electron app
+(`electron . --no-sandbox`, reusing the running stack; chrome-sandbox still not SUID-root on this box).
+Verified the **"ride on GNOME" indexing loop is live and current**:
+- **GNOME OS index is warm** — `localsearch status` = idle, **2511 files / 940 folders** (well past the
+  earlier 32; the `.git`-ignore fix from the entry below is holding).
+- **Cadence scheduler ran this boot** — logged `[gnome-cadence] started — resume in 8s, tick every 15m`,
+  and the resume pass actually fired (server up 15:42:27 → `storage/gnome-sync/amadocs-library.json`
+  rewritten 15:42:42, the ~8s resume). One folder tracked: `…/teaching_docs/ICT_MOET` → `amadocs-library`.
+- **That folder is fully in sync** — GNOME has extractable text for **22** files there; all **22** are
+  embedded (22 doc JSONs, 22 workspace docs, 2.4M LanceDB table). 22/22, steady state.
+
+**⚠️ Finding — `dryRun` `queued`/`indexed` counts include text-less files the real embed path skips.**
+A `dryRun` gnome-sync on `ICT_MOET` perpetually reports `indexed:24, queued:2`, but a real sync embeds
+**0** and holds at 22 (`tracked:22`). Not a stall: of the **31** files GNOME knows in that folder, only
+**22 have `nie:plainTextContent`** — the real path queries for text, gets none for those 2, and correctly
+skips them. The 2 phantom "queued" files are the known **`.docx` extraction failures** (GNOME's
+"Document must begin with an element (e.g. <book>)" — here `Semester Plan ICT…docx` + `VTA_Term3…docx`).
+So the dryRun preview count is misleading (over-reports by the count of text-less GNOME entries) even
+though actual indexing is correct and complete. **Two follow-ups:** (1) make the dryRun `queued`/`indexed`
+count only text-bearing files so the preview matches what executes; (2) the root cause is the GNOME docx
+blind spot AMAdocs' own parser/OCR is *meant* to backstop — that backstop isn't wired into the gnome-sync
+path, so those docx stay invisible. Neither is a regression; the cadence loop itself is correct.
+
+## ✅ RESOLVED (2026-06-20) — sparse index = the `.git` ignore rule; preview not broken; status doc shipped
+
+Follow-up to the "OBSERVED" entry below — all three threads closed in one session.
+
+**(1) The index wasn't incomplete — it was excluded.** After idling, the count was still stuck at 32
+files / 14 with text. Root cause: GNOME Tracker's default
+`gsettings org.freedesktop.Tracker3.Miner.Files ignored-directories-with-content` = `['.trackerignore',
+'.git', '.hg', '.nomedia']` → **any directory containing `.git` is skipped, recursively.** `teaching_docs`
+is a git+Obsidian vault, so the entire tree (973 files: 424 pdf, 196 md, 101 docx…) was ignored. Non-git
+dirs (Downloads, Documents top-level) indexed fine, which is why it looked "thin" not "off." The
+`localsearch status` failure list (9 docx `<book>` errors) is **stale/irrelevant** — those paths had 0
+live entries; the docx extractor actually works fine on them when run directly (`localsearch extract`
+pulls full `nie:plainTextContent`). **This is a real "ride on GNOME" blind spot:** the target audience
+(developers, Obsidian users) keep docs inside git repos/vaults that LocalSearch ignores by default.
+
+**Fix applied (user-approved):**
+```
+gsettings set org.freedesktop.Tracker3.Miner.Files ignored-directories-with-content "['.trackerignore', '.nomedia']"
+gsettings set org.freedesktop.Tracker3.Miner.Files ignored-directories "['po','CVS','core-dumps','lost+found','node_modules','.git','.svn','dist','build','.cache','.venv','__pycache__','.next','vendor']"
+systemctl --user restart localsearch-3.service
+```
+The first un-skips git repos; the second (ignore-**by-name**) keeps `.git` internals and `node_modules`
+out — needed because dropping `.git` from with-content pulled in **124,386** node_modules files. After the
+~45s purge: **14 → 901 files with extractable text**, teaching_docs **0 → 973 (804 with text)**,
+node_modules → 0. Settings persist in dconf. (For non-GNOME builds later, this argues for AMAdocs' own
+watcher+extractor over OS-default behavior.)
+
+**(2) Document preview was never broken — and never used LibreOffice.** It's 100% client-side: `doc-original`
+streams the file → UI dispatches by mime → PDF.js / mammoth.browser.min.js / xlsx.full.min.js (all bundled
+in `vendor/`), else text fallback. Verified the engine side healthy (`doc-original` 200 + correct MIME;
+`doc-view` good JSON) and rendered a real docx live in Electron via CDP (rich mammoth HTML, no error). It
+*looked* broken because `showFilePreview()` only renders when the file is in `docIndex`, which is built from
+the **amadocs-library** workspace — and that workspace was **empty** (0 docs). Every tree file therefore hit
+the "Right-click → analyse" placeholder. Indexed `ICT_MOET` (24 files) via `gnome-sync` → `loadDocIndex()` →
+docIndex.size 22 → previewing a real `.docx` rendered correctly. **Resolution: index content (now unblocked
+by fix #1); no code change to the preview path.**
+
+**(3) Status doc shipped (read-only v1).** The app now opens to a live `AMADOCS-STATUS.md` in the preview
+pane (user's idea — keep config/status out of the chrome). New `GET /api/amadocs-status` in
+`server/endpoints/workspaces.js` → `buildAmadocsStatusMarkdown()` gathers workspaces+doc counts, GNOME
+status + synced folders, model/embedder, engine/Node version → writes `storage/AMADOCS-STATUS.md` → returns
+`{markdown}`. UI adds `renderStatusMd()`/`mdInline()` (handles `**bold**`, `` `code` ``, `- lists`) +
+`showStatusDoc()` wired last in BOOT; `.status-doc` CSS. Source `tooling/amadocs-ui/index.html` cp'd →
+`amadocs-desktop/ui/`. Verified rendering live. **Deferred to v2:** interactive config controls (radio/toggle
+for model, cadence, deep-vs-catalog) — Markdown can't do interactive widgets, but our Electron DOM can; needs
+a widget-capable status renderer. **Live-app diagnosis recipe used:** launch `amadocs-desktop` electron with
+`--no-sandbox --remote-debugging-port=9222` (reuses running :3001 stack), drive with `node tooling/cdp.js
+eval '<js>'`.
+
+## 🔎 OBSERVED (2026-06-20) — the OS index on this GNOME box is sparse so far (core-bet reality check)
+
+First real look at what LocalSearch has actually extracted on this Ubuntu/GNOME box (the move's whole
+premise — "ride on a warm OS index"). Drove the live app fine end to end (live tree, AI-state chips,
+folder/file REPL scope, both Desktop + Terminal skins — screenshots taken), but the **index itself is
+thin**:
+
+- **Daemon up, idle.** `localsearch-3` running; `localsearch status` → *"Indexer is idle"*, scope
+  `index-recursive-directories = ['$HOME']` (single-dirs empty). D-Bus reachable, `GnomeBridge.available()`
+  = true.
+- **Only 32 files / 72 folders indexed**, of which **just 14 have extractable text**
+  (`nie:plainTextContent`) — and 14 is *all AMAdocs currently has to ride on*. That's a tiny fraction of
+  a real `$HOME` (the `teaching_docs/` corpus alone is hundreds of docs) → the crawl is **incomplete**,
+  not warm yet. (Idle-aware: it defers; leaving the box idle for a few hours should let it deepen.)
+- **~169 recorded extraction failures**: 155 `.mts` (AVCHD video — no text extractor, expected/benign),
+  **9 `.docx`** failing with `"Could not open: Error on line 1 char 1: Document must begin with an
+  element (e.g. <book>)"` (a parser error in LocalSearch's docx path), 4 `.xls`, 1 `.png`. The `.docx`
+  failures are a **genuine blind spot** — exactly the seam AMAdocs' own parser/OCR is meant to cover,
+  and notable because `teaching_docs/` is `.docx`-heavy.
+
+**Plan:** leave the machine idling a few hours, then re-check `localsearch status` + the text-bearing
+count (`SELECT (COUNT(DISTINCT ?u)) WHERE { ?ie nie:plainTextContent ?t ; nie:isStoredAs ?do . ?do nie:url ?u }`).
+If it stays stuck at ~32, the crawl needs a nudge (`localsearch index --recursive ~/Documents`) or the
+`.docx` extractor needs investigating. **This is the core bet's freshness/coverage question made real —
+track it.**
+
+## ✅ DONE (2026-06-20) — Granite blessed as the bundled default (was phi3.5)
+
+`granite4.1:3b` (IBM, Apache-2.0) is now the default chat model everywhere, not just in
+`.env.development`. Granite stays on-source far more cleanly than phi3.5 — it doesn't leak the
+`Context N` chunk-scaffolding that `stripScaffolding`/`capAnswer` have to claw back (4/12 answers on
+phi3.5; see the verbosity log below), so blessing it removes the product's most visible rough edge.
+Three spots that still hard-coded phi3.5:
+- **`amadocs-desktop/main.js` → `packagedEngineEnv()`** — `OLLAMA_MODEL_PREF: "phi3.5"` → `"granite4.1:3b"`.
+  This is the real "bundled default": dev reads `.env.development` (already granite), but the packaged
+  app passes env explicitly, so this was the one place a shipped build still defaulted to phi3.5.
+- **`server/utils/collectorApi/index.js`** — the doc-summary model fallback `"phi3.5"` → `"granite4.1:3b"`
+  (only hit when neither `SUMMARY_MODEL_PREF` nor `OLLAMA_MODEL_PREF` is set; matches the blessed default).
+- **`server/endpoints/workspaces.js` → `AMADOCS_MODEL_CATALOG`** — granite moved to the **lead** entry,
+  tagged `default:true` + "· the default" in its blurb; phi3.5 demoted below phi4-mini and relabelled
+  "Older balanced all-rounder" (no longer "the default"). The first-run download overlay pulls the
+  catalog's `default:true` entry, so it now fetches granite. (Catalog stays an MIT/Apache allowlist.)
+
+The Phase 2 UI hard-codes no model (the model picker was a Phase 1 feature, not yet re-wired), and the
+library workspace is left unpinned (`ensureLibraryWorkspace` sets only `chatMode:"query"`), so it
+inherits the system default — i.e. granite — with nothing else to change. `OLLAMA_MODEL_TOKEN_LIMIT`
+left at 4096 (safe/conservative; granite handles far more). `node --check` on the changed server file
+passes. Historical phi3.5 test logs below are left as-written (they record what was actually run then).
+
+## ✅ DONE (2026-06-20) — Background indexing cadence scheduler (resume-on-relaunch + periodic tick)
+
+The last unbuilt piece of the "ride on GNOME" loop. The bounded `gnome-sync` already leaves no-limit
+overflow + any crash/quit-dropped files un-finalized so the *next* sync re-sees them (the durable
+"continue" contract) — but nothing was firing those next syncs automatically. Now a server-side
+scheduler does: it **resumes pending/overflow work for every synced folder on relaunch** and runs a
+**light periodic delta tick** to pick up new/changed/deleted files going forward.
+
+**Refactor first (no behaviour change):** extracted the whole durable PLAN/EXECUTE/finalize-on-confirm
+orchestration out of the `gnome-sync` endpoint into **`GnomeBridge.runSync({slug,folder,exclude,limit,
+dryRun,reconcile,userId,fromScheduler})`** → returns `{status, body}` (the HTTP-style code the endpoint
+relays verbatim). The endpoint (`endpoints/workspaces.js`) is now a ~15-line wrapper; the scheduler
+shares the **same** code path, so the subtle no-over-claim/durable logic can't drift between the two.
+Endpoint contract unchanged (400/503/200-dryRun/202-execute).
+
+**Scheduler (`server/utils/GnomeBridge/cadence.js`)**, wired into both `bootHTTP`/`bootSSL` listen
+callbacks (`utils/boot/index.js`). THE #1 RULE governs every line:
+- **Serial, machine-wide.** Never dispatches a folder's embed while ANY worker is still embedding
+  (`Embed.hasRunningWorker()`) — one folder at a time, no piling on across workspaces.
+- **Respects the global STOP.** New `ingestPaused` latch in `EmbeddingWorkerManager` — `stopAll()`
+  sets it; the scheduler skips entirely while it's set. The kill switch *stays* killed: the flag clears
+  only on an explicit user-driven (non-dryRun, non-scheduler) `runSync`, or a fresh app launch
+  (in-memory). The scheduler's own runs pass `fromScheduler:true` and never clear it.
+- **Never pokes the OS indexer silently.** Runs `reconcile:false`, so on a box where LocalSearch is
+  dormant it just no-ops on the 503 and retries next tick — it never restarts a system service behind
+  the user's back (deliberate, per [[k-base-ingest-safety]]).
+- **Bounded.** Relies on `runSync`'s own per-call `GNOME_SYNC_CAP` + the embedder's per-doc cool-down.
+- **Cadence:** a resume pass ~8 s after boot, then `setInterval` every `GNOME_CADENCE_MS` (default
+  15 min). When a tick leaves work behind (overflow to drain, or a worker still busy) it schedules one
+  short follow-up (`GNOME_CADENCE_FOLLOWUP_MS`, default 45 s) so resume/large-batch drains progress
+  promptly instead of waiting a whole period between bounded chunks. Single-flight (`ticking` guard);
+  all timers `unref()`'d so they never hold the process open. Off switch: `GNOME_CADENCE_DISABLED=1`.
+
+**Verified (2026-06-20):** `node --check` on all 5 changed server files. Two isolated logic harnesses
+(stub the two deps via the require cache): the scheduler's **10** guard/flow cases pass — paused →
+zero dispatch; worker-running → serial skip + "work remains"; dispatch on folder A stops before
+folder B; scheduler opts (`fromScheduler:true`/`reconcile:false`/`dryRun:false`) + saved `exclude`
+carried; 503 → no-op; all-caught-up → no follow-up; re-entrant tick single-flights; empty state →
+no-op. Plus **8** `EmbeddingWorkerManager`/`GnomeBridge` cases: pause flag latch/clear, `stopAll()`
+latches the pause, `runSync`/`listSyncedSlugs` exported.
+
+**✅ VERIFIED LIVE on this GNOME box (2026-06-20)** — against the real engine (TinySPARQL daemon up,
+native ONNX embedder, real `BackgroundService` worker), throwaway `cadence-test` workspace, fully torn
+down after. (A) **Boot wiring:** the real server logs `[gnome-cadence] started — resume in …s, tick
+every 15m` and exits clean — no boot crash, empty-state resume tick no-ops. (B) **Drain, 11/11:**
+`/home/user/Downloads` had 11 OS-indexed files; with `GNOME_SYNC_CAP=3` an initial user sync embedded 3
+(state finalized 3 confirmed), then successive `cadence.tick()`s **drained 3 at a time — tracked
+3→6→9→11** (57 vectors written to LanceDB), and the caught-up tick reported no work. (C) **STOP stays
+stopped:** `stopAll()` latched the pause → the next tick no-op'd; a `dryRun` did NOT clear it; an
+explicit (non-scheduler) user sync DID clear it. Teardown dropped the throwaway lance table + 57
+vectors + 11 doc pins + workspace + doc folder + state file; the real `amadocs-library`/`teaching`/
+`my-documents` workspaces were untouched. Not yet exercised through the **packaged Electron** app, but
+the engine-side cadence path is now proven end to end on real GNOME.
+
+## ✅ DONE (2026-06-19) — Three UI skins (pure CSS theming, no structural change)
+
+Added two more visual "feels" alongside the existing dark TUI look, all via the existing
+`[data-theme]` + CSS-variable mechanism. **No structural/markup/feature changes** — same tree, tabs,
+preview and REPL in every skin; the difference is colour + typeface + corner-rounding only.
+
+- **Three skins**, cycled by the top-bar button (`toggleTheme()` → `THEMES` list / `applyTheme()`;
+  default honours OS `prefers-color-scheme`):
+  - `dark` → **"Terminal"** — dark · monospace · sharp. Byte-for-byte the prior look (its vars equal
+    the old hardcoded values), so nothing regressed.
+  - `slate` → **"Slate"** — new dim-slate palette · sans · blue accent · medium rounding. The
+    "halfway between TUI and desktop" feel (blue accent nods to the search-first reference mock).
+  - `light` → **"Desktop"** — the existing light theme, now genuinely sans + generous rounding
+    (Finder/Obsidian feel).
+- **Made the *feel* themeable, not just colour:** promoted typeface and corner-rounding to vars —
+  `--font-ui` (mono vs sans) and `--radius` / `--radius-sm` / `--radius-xs`. `body` + the context-menu
+  `font-family` now read `--font-ui`; the ~14 *chrome* `border-radius` values were swapped to the
+  radius vars. The simulated document-page/image radii (2px / 0.14rem) were left fixed on purpose —
+  a rendered doc shouldn't reflow because you reskinned the window chrome.
+- Loaded **IBM Plex Sans** in the font `<link>` (also fixes a pre-existing fallback: the page-preview
+  CSS already referenced Plex Sans but it was never loaded).
+- Source of truth `tooling/amadocs-ui/index.html`, then `cp`'d to `amadocs-desktop/ui/index.html`
+  (verified `diff -q` identical; the inter-copy diff was 100% these skin edits — zero functional drift).
+
+**Gotcha (Electron launch on this box):** `yarn start` aborts with a `chrome-sandbox` SUID error
+(*"…must be owned by root and have mode 4755"*). Proper fix needs one sudo:
+`sudo chown root … && sudo chmod 4755 …/node_modules/electron/dist/chrome-sandbox`. Dev workaround
+used this session: `node_modules/.bin/electron . --no-sandbox`. Electron reuses a running dev stack
+if `:3001` already answers (`main.js:197`), so launching it alongside `start-stack.sh` is fine.
+
+## ✅ DONE (2026-06-19) — Phase 2 wiring (port prototype → real UI) — ALL STAGES A–D COMPLETE
+
+Built the Phase 2 "semantic file manager" UI per `AMAdocs-SPEC.md`, staged in 4 stages (A–D).
+Source of truth = `tooling/amadocs-ui/index.html`, `cp`'d to `amadocs-desktop/ui/index.html`.
+Phase 1 UI backed up at `index.phase1.html` in both locations.
 
 **✅ Stage A done (2026-06-19) — shell + plumbing port.** Replaced the Phase 1 chat UI with the
 Phase 2 three-panel shell (file tree / content area / AI REPL) ported verbatim from
@@ -103,8 +626,58 @@ flips `○ pending → ● ✓ deep` (dot + chip), header → `4 indexed`, sort-
 counter → `IDX 4`, `diagram.png` stays `⚡ analyse` (image excluded from bulk index); file click →
 preview metastrip `indexed ● deep` + the real `aiSummary` in the SUMMARY card. **Zero console errors**
 (checked after reload). `_stageC_check.html` + the :8183 server removed after; synced to
-`amadocs-desktop/ui/`. NEXT = Stage D (steps 7–8: REPL chat via `streamChat` with folder/file path
-filter, context-menu actions — analyse/summarise/show-in-file-manager).
+`amadocs-desktop/ui/`.
+
+**✅ Stage D done (2026-06-19) — REPL chat + context-menu actions (steps 7–8).** Wired the live
+REPL chat and all context-menu actions. Three engine files changed + UI wired:
+
+**Engine (3 files):**
+- `server/utils/vectorDbProviders/lance/index.js` — added `scopePath` param to
+  `performSimilaritySearch`, `similarityResponse`, `rerankedSimilarityResponse`. If set, adds
+  `.where(starts_with(sourcePath, '<path>'))` as a pre-filter on the LanceDB vector search.
+  Probed: unquoted identifier resolves case-insensitively in DataFusion (lancedb 0.15.0);
+  quoted double-quotes resolve the column but return 0 rows — must stay unquoted. `.where()` is
+  a pre-filter by default (confirmed: `postfilter(true)` is the explicit post-filter API). Both
+  folder prefix (`/path/folder/`) and exact file path (`/path/file.pdf`) work via `starts_with`.
+- `server/utils/chats/stream.js` — added `scopePath` to `streamChatWithWorkspace` signature,
+  threads it to `performSimilaritySearch`.
+- `server/endpoints/chat.js` — extracts `scopePath` from POST body, passes to
+  `streamChatWithWorkspace`.
+
+**UI (`tooling/amadocs-ui/index.html`, synced to `amadocs-desktop/ui/`):**
+- `streamChat()` — accepts `scopePath` option, includes in POST body if set.
+- `openCtx(e, entryPath)` — upgraded from `filename`-only to full path. Stores in module-level
+  `ctxEntryPath`. Live call sites (tree nodes via `full`, list/grid rows via `el.dataset.path`)
+  pass the full path; static demo rows pass just the name and fall back gracefully.
+- `selectFolder()` — intro text now includes a `<div id="replFolderConv">` anchor for queries.
+- `showFilePreview()` — `#docarea` now calls `renderOriginalInto()` for indexed files (real
+  preview); `#replFile` renders summary card + `<div id="replFileConv">` for conversation.
+- New **STAGE D** block:
+  - `runRepl()` — resolves scope from `view.filePath`/`view.folderPath`, calls `streamChat`
+    with the right `scopePath`. File mode: streams answer + resolves citations via
+    `resolveCitations`/`matchPage`/`getDocView`; citation chips click → `renderOriginalInto`
+    with `{targetPage, targetText}`. Folder mode: collects `sources`, renders file-result cards
+    (click → `showFilePreview`); no LLM answer shown per Phase 2 spec. Handles empty results,
+    abort (new query cancels in-flight), and `isModelMissingError` gracefully.
+  - Enter key + "⏎ run" click wired to `runRepl()`.
+  - Ctx actions: `ctxAnalyse` → `deepSearchDoc(docpath)` + `refreshAiState` + toast;
+    `ctxSummarise` → `summarizeDoc(docpath)` + live summary card update if file is open;
+    `ctxReveal` → `desktop.revealInFolder(path)` (falls back to toast in browser dev);
+    `ctxPrioritise` / `ctxSaveCopy` → honest "Coming soon." toasts.
+
+**Stage D verification (2026-06-19):** script parses (55,852 chars, vm.Script, 0 fail). Live
+Chrome checkpoint on :8181 (static server) with a mocked `window.amadocs` bridge + canned
+SSE fetch stub:
+- `streamChat` POST body confirmed to include `scopePath` key.
+- Folder mode `runRepl()`: appended `.repl-exchange` with `.cmd` + `.repl-folder-result` cards
+  (name, snippet, score) + provenance count — verified via `innerHTML`.
+- File mode `runRepl()`: `.cmd` ✓ · `.answer` ✓ (streamed text) · `.provenance` ✓ · `.prov-link`
+  chips ✓ — all present and correct.
+- `openCtx('/home/demo/Documents/spec.pdf')` → `ctxEntryPath` set correctly, `ctxFilename`
+  textContent = `spec.pdf` ✓.
+- Ctx actions: reveal → "File manager bridge not available in browser dev mode." ✓;
+  summarise on unindexed → "File not indexed yet." ✓; prioritise → "Coming soon." ✓.
+- **Zero console errors.** Synced to `amadocs-desktop/ui/`.
 
 ## 🧭 CURRENT PHASE (2026-06-16) — Semantic search by *riding on* GNOME (TinySPARQL/LocalSearch)
 
