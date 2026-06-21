@@ -1,30 +1,16 @@
-# AMAdocs — Phase 2 Spec: Semantic File Manager
+# AMAdocs — Product Spec: Semantic File Manager
 
-> Status: **Design / pre-build** (2026-06-18). Phase 1 codebase is the starting point.
-> Entry point summary in `K-base.md` → "Phase 2 Reframe".
-
----
-
-## The pivot in one sentence
-
-Stop asking users to bring files to the app. Go to the files instead — build a file manager
-that already understands what's in everything.
+> The canonical product spec. Overview in `K-base.md`; engineering log in `AMAdocs-DEV-NOTES.md`.
 
 ---
 
-## What changes vs. Phase 1
+## The idea in one sentence
 
-| Phase 1 (AMAdocs) | Phase 2 (Finder++) |
-|---|---|
-| Drop files into collections | Browse the real filesystem |
-| Collections (workspaces) as organising unit | Folders/drives as organising unit |
-| Chat is the primary interface | File browser is the primary interface |
-| AI is the foreground | AI is the infrastructure |
-| Embed-then-chat | Browse-then-ask |
-| Catalog card = embedded vector | Catalog card = shown in right panel on select |
+Don't ask users to bring files to the app — go to the files instead. A file manager that
+already understands what's in everything.
 
-The Phase 1 engine and all its proven components survive. The UI is rebuilt around a
-file-manager shell.
+The browser is the primary interface; the AI is infrastructure. You browse the real
+filesystem, and the AI catalogs, summarises, and answers questions about what you select.
 
 ---
 
@@ -74,6 +60,10 @@ file-manager shell.
 - Tabbed — multiple files can be open simultaneously.
 - Supported previews: PDF (PDF.js), images (image viewer + AI caption/OCR panel beneath),
   text/Markdown (text view), extracted text for Office/audio.
+- **Preview is decoupled from indexing** (as of 2026-06-21): any local file previews straight
+  from disk via the `window.amadocs.readFile` bridge, indexed or not — preview = "let me see it";
+  indexing (caption/OCR/search) stays opt-in. The engine-backed extras (citation jump-to-page, the
+  image caption/OCR panel, the "extracted text the AI reads" view) still require the file to be indexed.
 - Unsupported types: show file icon + metadata panel (size, type, modified date, any
   LocalSearch-extracted text, aiSummary if available). Never a blank error — always something useful.
 
@@ -100,9 +90,22 @@ Three states depending on selection:
 
 ### Top bar
 
+- **Nav buttons (top-left): ⌂ Home / ‹ Back / › Forward.** Home opens the Homepage (below); Back/Forward
+  walk a browser-style history over the middle panel's destinations (Home / folder / file). Built 2026-06-21
+  (replaced the old decorative window-style dots) — see `AMAdocs-DEV-NOTES.md`.
 - Simple filename / keyword search (TinySPARQL FTS — instant, no LLM, no embeddings).
 - Separate from the AI chat. Answers the "find file named X" question; AI chat answers
   the "find files about X" question. Two distinct modes, clearly labelled.
+
+### Homepage (the launch surface)
+
+The app opens to a **Homepage** in the middle panel — the place we lean on to inform the user and offer
+options, instead of cramming everything into menus. The ⌂ Home button always returns here. **v1 (lean,
+2026-06-21):** a hero (name · version · tagline), a status-card grid (Index / Library / Model / Engine),
+an indexed-folders list, and Quick actions (Browse my files · Index a folder… · Refresh). Fed by the
+`/amadocs-status` endpoint's structured `data` (which also still writes the on-disk `AMADOCS-STATUS.md`).
+Designed to grow: indexing progress + STOP on the Index card, a model picker on the Model card, per-folder
+re-index/remove, onboarding.
 
 ---
 
@@ -115,7 +118,7 @@ Three states depending on selection:
 ├ 🧠 Summarise            (generate or refresh aiSummary via LLM)
 ├ ⬆️  Prioritise           (move to front of background indexing queue)
 ├ 💾 Save copy with AI notes  (export file copy with summary/OCR/caption embedded
-│                              as XMP metadata — the Phase 1 metadata-embed feature)
+│                              as XMP metadata)
 └ 📂 Show in file manager  (reveal in Nautilus)
 ```
 
@@ -140,29 +143,24 @@ only path that writes AI data into a file — and it writes a copy, not the orig
 
 ## Initial setup
 
-On first launch (or when a new drive/folder is added), a one-shot indexing pass runs in
-two phases:
+On first launch (or when a new drive/folder is added), a one-shot indexing pass runs. It is
+presented as **one honest onboarding moment** — "AMAdocs is building your search index" — not
+a piecemeal drip-feed. Under the hood it runs in two phases:
 
-**Phase 1 — Embedding pass (fast: minutes to ~1 hour depending on corpus size)**
+**Embedding pass (fast: minutes to ~1 hour depending on corpus size)**
 - Reads LocalSearch-extracted text for all indexed files (no LLM, no Ollama).
 - Computes embeddings using the native ONNX embedder (all-MiniLM-L6-v2).
 - Writes to LanceDB. Semantic search is available after this phase.
 - Safe queue: serial, cool-downs, durable, hard STOP — THE #1 RULE applies.
 
-**Phase 2 — Summary generation (slower: hours, background)**
+**Summary generation (slower: hours, background)**
 - Runs the LLM (granite4.1:3b) to generate `aiSummary` per file.
 - Strictly serial, cool-downs, pauses when machine is active (idle-aware).
-- Progress shown in the right panel as a persistent status chip.
-- Summaries fill in progressively — the AI panel shows a spinner for unsummarised files.
+- Summaries fill in progressively; the AI panel shows a spinner for unsummarised files.
 
 **Images and scanned docs:** excluded from both auto-phases. On-demand only via
 right-click "Analyse with AI". Rationale: vision inference is heavy; auto-running
 moondream on 10,000 photos would violate THE #1 RULE.
-
-**Honest onboarding message:**
-> "AMAdocs is building your search index. Semantic search will be ready in about
-> [N minutes]. File summaries will fill in over the next few hours in the background.
-> You can use the app now — keyword search works immediately."
 
 **After setup:** incremental maintenance. GNOME LocalSearch's inotify monitoring detects
 new/changed/deleted files. The gnome-sync delta path re-embeds only what changed. Cost
@@ -170,66 +168,59 @@ scales with changes, not corpus size.
 
 ---
 
-## What survives from Phase 1 (reuse directly)
+## Reused engine components
 
-- **TinySPARQL bridge + gnome-sync** — the indexing backbone. `POST /gnome-sync` is still
-  the embed trigger; the file tree just makes the folder the natural unit of organisation.
+The AMAdocs engine and its proven components are reused directly under the file-manager shell:
+
+- **TinySPARQL bridge + gnome-sync** — the indexing backbone. `POST /gnome-sync` is the embed
+  trigger; the file tree makes the folder the natural unit of organisation.
 - **Safe ingest queue** — serial worker, cool-downs (EMBED_COOLDOWN_MS), hard STOP
   (stopAll / stopWorkspace), durable finalize-on-confirm, bounded batches + remaining.
 - **All file viewers** — PDF.js, image viewer + caption/OCR panel, text view.
-- **Grounded citation loop** — chunk → page → passage highlight. Still the differentiator.
-  In a finder context, "jump to where in the document this came from" is even more natural.
-- **aiSummary** — generation, caching, on-demand refresh. Now shown in the right panel
-  automatically rather than only on right-click.
+- **Grounded citation loop** — chunk → page → passage highlight. The differentiator; "jump to
+  where in the document this came from" is even more natural in a finder context.
+- **aiSummary** — generation, caching, on-demand refresh. Shown in the right panel automatically.
 - **Vision captioning (moondream)** — right-click "Analyse with AI" on images.
 - **OCR** — same, for scanned docs.
-- **LanceDB embeddings + semantic retrieval** — unchanged. Scope filter
-  (`filterIdentifiers`) already designed for the folder-scoped chat path.
-- **API auth token gate** — unchanged.
-- **Session scoping** — unchanged.
-- **`stripScaffolding()` + `capAnswer()`** — unchanged.
+- **LanceDB embeddings + semantic retrieval** — scope filter (`sourcePath` / `filterIdentifiers`)
+  drives the folder-scoped chat path.
+- **API auth token gate**, **session scoping**, **`stripScaffolding()` + `capAnswer()`**.
 
-## What is new build
+## New UI build
 
-- **File tree component** — real filesystem tree, left panel. Expand/collapse, status
-  indicators per file, left-click and right-click handling.
-- **Folder browser view** — middle panel mode 1. Grid/list of folder contents with
-  metadata + summary subtitles.
-- **File preview tabs** — middle panel mode 2. Tab bar, tab switching, reuses existing
-  viewers.
-- **Right panel: summary card + scoped chat** — the summary card is new presentation;
-  the chat + retrieval engine behind it is Phase 1 reused.
-- **Top search bar** — TinySPARQL FTS, filename + keyword. Separate from AI chat.
-- **Setup/onboarding screen** — honest progress for Phase 1 (embedding) and Phase 2
-  (summaries) of initial indexing.
-- **Background indexing cadence scheduler** — resumes pending work on relaunch, runs
-  summary generation as a low-priority background task.
-- **Chat result mode: files** — when a folder is selected, chat returns file links +
-  snippets rather than a synthesised answer. Clicking a result opens preview.
-
-## LanceDB schema bug resolution
-
-The Phase 1 open bug (bridged gnome-sync docs adding 4 extra columns vs. normal
-drag-drop uploads causing Arrow schema mismatch) is resolved by elimination. In Phase 2
-there is only one doc producer: gnome-sync. Drag-drop as a primary ingest path is
-retired. The mixed-schema problem disappears.
+- **File tree component** — real filesystem tree, left panel.
+- **Folder browser view** — middle panel mode 1, with metadata + summary subtitles.
+- **File preview tabs** — middle panel mode 2, reusing existing viewers.
+- **Right panel: summary card + scoped chat.**
+- **Top search bar** — TinySPARQL FTS, separate from AI chat.
+- **Onboarding screen** — one honest progress moment for initial indexing.
+- **Background indexing cadence scheduler** — resumes pending work on relaunch, runs summary
+  generation as a low-priority background task.
+- **Chat result mode: files** — folder scope returns file links + snippets, not a synthesised answer.
 
 ---
 
-## Open questions (to be resolved before build)
+## Resolved design decisions
 
-1. **Workspace/slug model under the hood. ✅ RESOLVED.** One global workspace
-   (`amadocs-library`). Folder-level scoping is done via a path filter on `sourcePath`
-   in LanceDB queries — not separate tables. Simpler, and the existing `filterIdentifiers`
-   mechanism already supports this. Per-folder workspaces rejected as unnecessary complexity.
+1. **One global workspace (`amadocs-library`).** Folder-level scoping is a `sourcePath` path
+   filter in LanceDB queries — not separate tables. Per-folder workspaces rejected as
+   unnecessary complexity.
 
-2. **What happens to Phase 1 users?** If anyone is running AMAdocs Phase 1, their
-   embedded collections don't map to the new folder-tree model. Likely: a migration note
-   in the release; existing LanceDB data is still queryable but the UI no longer surfaces
-   it in the old way.
+2. **One doc producer (gnome-sync).** Because everything flows through the gnome-sync path,
+   the earlier mixed-schema LanceDB problem is moot. (The schema bug was also fixed directly
+   via `withAmadocsSchema()` — see DEV-NOTES.)
 
-3. **The `p.N` citation label for bridged docs** — still open from Phase 1. Low priority
-   but worth fixing during Phase 2 build since the citation loop is more prominent.
+## Open questions
 
-4. **Name.** "Finder++" was raised as a candidate. To be decided before public release.
-   AMAdocs may stay as the working name through Phase 2 development.
+1. **Existing data migration.** If anyone is running an older drop-zone collection, it doesn't
+   map to the folder-tree model. Likely: a migration note in the release; old LanceDB data stays
+   queryable but is no longer surfaced the old way.
+
+2. ✅ **The `p.N` citation label for bridged docs** — RESOLVED (2026-06-21) for backstop PDFs.
+   `buildDoc` carries `asPDF`'s per-page char ranges through `materializeViaCollector`, so
+   collector-backstop PDFs (scanned/OCR/empty-text) get `p.N` labels; GNOME-text PDFs stay label-less
+   by design (would require re-parsing every PDF). Verified live on the 83-page scanned "Year 6 ICT"
+   book (chips `p.11`/`p.18`). See DEV-NOTES.
+
+3. **Name.** AMAdocs is the working name; "Finder++" was a candidate. To be decided before
+   public release.

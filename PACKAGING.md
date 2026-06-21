@@ -52,8 +52,8 @@ dir to test a true first run. The bundle has no LLM, so to actually chat/caption
 models into the running app (or pre-seed `~/.config/AMAdocs/ollama-models`):
 
 ```bash
-curl http://127.0.0.1:11434/api/pull -d '{"name":"phi3.5"}'     # chat (~2.2 GB)
-curl http://127.0.0.1:11434/api/pull -d '{"name":"moondream"}'  # vision (~1.7 GB)
+curl http://127.0.0.1:11434/api/pull -d '{"name":"granite4.1:3b"}'  # chat (~2.1 GB) — the default
+curl http://127.0.0.1:11434/api/pull -d '{"name":"moondream"}'     # vision (~1.7 GB)
 ```
 
 ## What's bundled (electron-builder `extraResources` + `files`)
@@ -76,7 +76,7 @@ rebuild native modules to Electron's ABI.
 
 ~2.3 GB AppImage (squashfs of a ~4.7 GB unpacked tree). Dominated by the **Ollama runtime
 libs (~2.1 GB: cuda_v12 1.2 G + cuda_v13 807 M + vulkan 56 M + CPU core 27 M)** and the
-engine node_modules (~1.5 G). **Ollama models (~4 G for phi3.5 + moondream) are NOT
+engine node_modules (~1.5 G). **Ollama models (~3.8 G for granite4.1:3b + moondream) are NOT
 bundled** → first-run download. Size wins available later: prune to a single CUDA major
 (driver-dependent), prune the duplicate onnxruntime web/node builds in server node_modules.
 
@@ -137,9 +137,10 @@ absent dir).
   answers `custom-models` with no installed *chat* model (hidden/vision models excluded;
   a network error is treated as "engine warming up", not first-run), AMAdocs shows a full-screen
   **"Welcome to AMAdocs"** setup overlay (`#firstRun`, `amadocs-ui/index.html` → synced to
-  desktop). One button downloads the default AI (phi3.5) with a live progress bar, plus an
+  desktop). One button downloads the default AI (granite4.1:3b) with a live progress bar, plus an
   opt-in (checked) "Let AMAdocs read images & scans" that pulls the vision model (moondream)
-  afterwards — both over the existing `pull-model` SSE endpoint. Sizes come from the catalog
+  afterwards — both over the existing `pull-model` SSE endpoint. The chat model pulled is the
+  catalog's `default:true` entry (now **granite4.1:3b**, Apache-2.0). Sizes come from the catalog
   (best-effort, with fallbacks). On success it refreshes the model picker and dismisses; on
   failure it offers "Try again"; "Set up later" dismisses and falls back to the reactive prompt.
   The SSE-reading loop is now a shared `streamModelPull()` helper used by both the first-run

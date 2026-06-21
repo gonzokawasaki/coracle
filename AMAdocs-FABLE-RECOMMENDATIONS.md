@@ -61,6 +61,10 @@ Phi-3.5-mini is a mid-2024 model. Better permissive options exist:
 > catalog is an MIT/Apache allowlist (`pull-model` refuses anything else) and the picker filters
 > `qwen2.5` out (`HIDDEN_MODELS`). `qwen2.5` may still sit in `tooling/ollama-models` for dev but
 > is never offered or pullable through the app.
+> ✅ **Bake-off resolved (2026-06-20):** the blessed default is **`granite4.1:3b`** (IBM, Apache-2.0),
+> not phi3.5 — it stays on-source without the `Context N` scaffolding leak phi3.5 exhibits. Now the
+> default in the packaged env + summary fallback + catalog lead (`default:true`); phi3.5 demoted but
+> kept available. phi4-mini sits second as the sharper MIT option.
 
 ---
 

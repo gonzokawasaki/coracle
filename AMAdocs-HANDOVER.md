@@ -5,10 +5,11 @@ moved to **Ubuntu (standard GNOME)** — deliberately, because the core bet ride
 indexer (LocalSearch/TinySPARQL), which is **dormant on non-GNOME** but **runs warm** on real GNOME.
 
 **Read these first, in order** — they are the source of truth and far more detailed than this file:
-1. `K-base.md` — what the product is, the 2026-06-15 "AI librarian" reframe, and the "ride on GNOME" direction.
-2. `AMAdocs-DEV-NOTES.md` — architecture, every custom change, current phase, open bugs. **Start at "🧭 CURRENT PHASE".**
-3. `PACKAGING.md` — the AppImage build (on hold) and packaging gotchas.
-4. `AMAdocs-FABLE-RECOMMENDATIONS.md` — an external review / checklist.
+1. `K-base.md` — what the product is: a private, local AI file browser that rides on the GNOME indexer.
+2. `AMAdocs-SPEC.md` — the canonical product spec (three-panel semantic file manager).
+3. `AMAdocs-DEV-NOTES.md` — architecture, every custom change, current state, open items. **Start at the top header.**
+4. `PACKAGING.md` — the AppImage build (on hold) and packaging gotchas.
+5. `AMAdocs-FABLE-RECOMMENDATIONS.md` — an external review / checklist.
 
 **Agent memory** — `agent-memory/` holds a snapshot of the previous Claude Code session's persistent
 memory (the distilled decision log + the `[[wikilinks]]` the docs reference). Read `agent-memory/MEMORY.md`
@@ -164,6 +165,13 @@ endpoint `POST /workspace/:slug/gnome-sync`). On real GNOME the "must restart lo
 re-crawl" caveat from DEV-NOTES should no longer apply, and the `TrackerNotifier` push-sync path
 becomes viable. **Verify this assumption early** — it's the core bet.
 
+> **🔎 First look on this box (2026-06-20):** daemon is up + D-Bus reachable, but the index is **sparse
+> so far** — `localsearch status` = *idle*, only **32 files / 72 folders** indexed and **just 14 with
+> extractable text** (a tiny fraction of `$HOME`; the crawl is incomplete, not warm yet). ~169 extraction
+> failures (155 `.mts` video = benign; **9 `.docx`** with a parser error = a real blind spot, and
+> `teaching_docs/` is docx-heavy). Left the machine idling to let the idle-aware crawl deepen; re-check
+> `localsearch status` + the text-bearing count later. Full detail in DEV-NOTES → "🔎 OBSERVED (2026-06-20)".
+
 ---
 
 ## Current state / where to pick up
@@ -174,16 +182,40 @@ resume — "THE #1 RULE"), the **UI folder-sync flow** (picker → dryRun banner
 the grounded visual citation loop.
 
 **Open items (from DEV-NOTES, most important first):**
-1. **⚠️ OPEN BUG — incompatible LanceDB Arrow schemas.** Drag-drop uploads **fail** in a workspace
-   that already holds bridged (gnome-sync) docs: the two doc producers write different column sets.
-   Workaround: don't mix bridged + dropped docs in one collection. Durable fix (make both producers
-   emit an identical column set) **not yet done**. See DEV-NOTES → "⚠️ BUG — OPEN (2026-06-17)".
-2. **Cadence scheduler** — resume pending sync on relaunch + a light periodic tick. Not built.
-3. **Promote Granite to default** — `granite4.1:3b` (Apache-2.0) stays on-source far more cleanly
-   than phi3.5 (which leaks `Context N` scaffolding that the UI then visibly claws back). `.env`
-   already points the default at granite; this is about making it the bundled/blessed default.
-4. Cosmetic `p.N` citation label for bridged (flat-text) docs — needs poppler page-ranges.
-5. Packaging: AppImage builds but the `dist/` artifact is stale; app icon + Windows/macOS pending.
+1. ✅ **Cadence scheduler** — DONE + VERIFIED LIVE (2026-06-20). Resume-on-relaunch + periodic delta
+   tick, server-side (`utils/GnomeBridge/cadence.js`), wired into boot. Shares the durable sync path via
+   the extracted `GnomeBridge.runSync()`; respects the global STOP latch. Proven live on this GNOME box:
+   boot-start logs clean, drained 11 real files 3-at-a-time across ticks, STOP stays stopped until an
+   explicit re-sync (throwaway ws, torn down). Only the packaged-Electron path is still un-eyeballed.
+2. ✅ **Promote Granite to default** — DONE (2026-06-20). `granite4.1:3b` (Apache-2.0) stays on-source
+   far more cleanly than phi3.5 (which leaks `Context N` scaffolding the UI then claws back). Beyond
+   `.env.development`, the **packaged** default (`amadocs-desktop/main.js` → `packagedEngineEnv`) and the
+   doc-summary fallback (`collectorApi`) now both read granite, and the download catalog leads with
+   granite (`default:true`); phi3.5 demoted, no longer labelled "the default".
+3. ✅ **Collector backstop for GNOME's extraction blind spots** — DONE + VERIFIED LIVE (2026-06-20 PM).
+   Files GNOME can't extract text for (docx/xlsx/pptx OOXML-routing failures, scanned PDFs, images) now
+   run through AMAdocs' own collector extractors and embed: office docs + scanned PDFs **automatically
+   during folder sync**, images **on-demand via right-click "analyse with AI"** (which previously
+   dead-ended on images). Engine: `GnomeBridge.queryBlindSpots`/`materializeViaCollector`/`backstopFile`
+   (idempotent by `sourcePath`), `POST /workspace/:slug/analyse-file`, generalized `doc-original`
+   fallback. ⚠️ Needs `ollama pull moondream` for image *captioning* (else only OCR text). See DEV-NOTES
+   top entry "✅ DONE (2026-06-20 PM) — Collector backstop".
+4. ✅ Cosmetic `p.N` citation label for bridged docs — DONE (2026-06-21, backstop PDFs only).
+   `buildDoc` now carries the per-page char ranges `asPDF` already computes through
+   `materializeViaCollector`, so collector-backstop PDFs (scanned/OCR/empty-text) + right-click-analysed
+   PDFs get `p.N` labels. `pages` is a disk-only doc-JSON field (read by `doc-view`), not in the LanceDB
+   schema. GNOME-text PDFs stay label-less by design (labeling them would mean re-parsing every PDF →
+   abandons ride-on-GNOME). Verified live in the Electron app on the 83-page scanned "Year 6 ICT
+   Translated KNTT" book → chips `p.11`/`p.18`, click jumps to the page. See DEV-NOTES top entry.
+5. ✅ `gnome-sync` dryRun over-count — FIXED (2026-06-21). `queryFileList` now requires non-empty
+   `nie:plainTextContent`, and `queryBlindSpots` treats empty-text backstop-ext files as blind spots —
+   so files GNOME stored an empty text for (an `.xlsx` + a scanned `.pdf` on the test corpus) route to
+   the collector backstop and actually embed instead of being counted-but-never-embedded. dryRun preview
+   now matches what executes. See DEV-NOTES top entry.
+6. Packaging: AppImage builds but the `dist/` artifact is stale; app icon + Windows/macOS pending.
+
+(The earlier LanceDB Arrow-schema bug — drag-drop vs. bridged docs writing different column
+sets — is **fixed** as of 2026-06-19 via `withAmadocsSchema()`; see DEV-NOTES.)
 
 ## Gotchas (the ones that cost real time — full list in DEV-NOTES)
 
