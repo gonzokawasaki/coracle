@@ -1,5 +1,23 @@
 # Coracle — Packaging (AppImage)
 
+> ## ✅ SHIPPED 2026-06-28 — `v0.1.0`, **require-Ollama** variant
+> Released `Coracle-0.1.0-x86_64.AppImage` (**662 MB**) at
+> [github.com/gonzokawasaki/coracle/releases/tag/v0.1.0](https://github.com/gonzokawasaki/coracle/releases/tag/v0.1.0).
+> **Ollama is NOT bundled** — `main.js resolveOllama()` finds the user's system Ollama (PATH +
+> usual dirs) or shows an "Install Ollama" screen; a running daemon is reused. `package.json`
+> dropped the `vendor/ollama` extraResource and added `homepage` (so the `pacman` target also
+> builds). To rebuild: re-stage `vendor/` (gitignored) — `vendor/node` (Node 22) + `vendor/anythingllm.db`
+> (a fresh `prisma migrate deploy` seed) — then `npm run dist`. No `vendor/ollama` needed.
+>
+> **Runtime requirements** are documented in the release notes + README: **GNOME LocalSearch /
+> TinySPARQL** (the file indexer Coracle reads through — on non-GNOME it's often installed but not
+> enabled: `systemctl --user enable --now localsearch-3.service`) and **Ollama**.
+>
+> A **bundled-Ollama** AppImage (~2.3 GB) was NOT shipped: it exceeds GitHub's **2 GiB** per-asset
+> release limit. A future bundled build would also need `resolveOllama()` to prefer
+> `resources/ollama/bin/ollama` before the system fallback. The bundled-build details below
+> (2026-06-14) remain valid reference for that path.
+
 Status as of 2026-06-14. Target: a single-file **AppImage** (Linux first; the machine
 we develop on). Goal: one download → double-click → runs, fully local, no setup.
 
