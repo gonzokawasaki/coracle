@@ -10,6 +10,106 @@
 Technical companion to `K-base.md` (overview) and `AMAdocs-SPEC.md` (product spec). This is the
 **engineering log** — newest entries on top, kept in chronological/archaeological order on purpose.
 
+## SESSION (2026-06-27 PM) — new logo + tab-✕ close fix + AppImage packaging recon [UNCOMMITTED]
+
+**1. New logo (cleaner).** User supplied `/home/user/Documents/coracletransparentlogo.png` — 512×512 RGBA,
+transparent, just the bevelled coracle **bowl, NO "CORACLE" wordmark** (nicer than the previous wordmarked
+ones). Copied verbatim to all 4 targets: `amadocs-desktop/coracle-logo.png` (splash),
+`amadocs-desktop/ui/coracle-logo.png` + `tooling/amadocs-ui/coracle-logo.png` (hero), `amadocs-desktop/build/icon.png`
+(app icon — picked up on next AppImage build). All 4 md5-identical. 512×512 meets electron-builder's ≥512 rule.
+
+**2. Tab ✕ didn't close — FIXED.** User reported the ✕ on a file-preview tab in the folder viewer "looks
+selectable but doesn't close the tab." Root cause: the ✕ was **purely decorative** — no click handler; the only
+thing that returned from a file preview to the folder was the `‹ Reports/` back button (`onclick="showFolder()"`).
+Fix (both UI copies, byte-identical): wired the ✕ to `event.stopPropagation();showFolder()` in BOTH the static
+markup AND the dynamic `showFilePreview` template (which rebuilds the active tab's innerHTML), plus
+`.tab__x{cursor:pointer}` + a hover highlight so it reads as a button. Verified at source level (2 handlers/file,
+`showFolder` is a top-level global so the inline onclick resolves). NOT yet eyeballed live in Electron.
+
+**3. AppImage packaging recon (no build run — deferred to tomorrow).** Findings: electron-builder + electron
+installed, electron binary cached (101 MB). BUT `amadocs-desktop/package.json` `extraResources` references a
+**`vendor/` dir that does not exist at all** — `vendor/node`, `vendor/ollama`, `vendor/anythingllm.db` are all
+missing → `npm run dist` fails immediately today. Payload is large: server `node_modules` 1.9 GB + collector
+`node_modules` 644 MB ≈ **2.5 GB** before any runtime; system Ollama is **2.1 GB** (`/usr/local/lib/ollama`) →
+bundling it makes a ~3–4 GB AppImage. Disk fine (170 G free). **Estimate:** the build *run* is ~15–25 min on this
+laptop (squashfs compression dominates); first *working* AppImage = a few hours attended (vendor prep + the usual
+bundled-server packaging iterations). **Open decision (recommend "require Ollama" for v1):** bundle Ollama (one-file
+but ~3–4 GB) vs require it installed (sub-1 GB, drop ollama from extraResources, app checks on launch — fits the
+Linux/AUR/Ollama early-adopter audience). See [[appimage-packaging]].
+
+## FEATURE (2026-06-27) — content-hash change detection, option 1 (GNOME-first gate) [UNCOMMITTED]
+
+**Why:** on a busy disk, a `touch` / git checkout / restore-in-place / same-length re-save bumps mtime
+without changing content — and our mtime-only `computeDelta` re-ran granite on all of it. User steer: *lean
+on GNOME features, only build on top if necessary.* GNOME exposes `nfo:fileLastModified` AND `nfo:fileSize`
+but no content hash — so size is the free GNOME-native second signal; the hash is the one thing we add.
+
+**What shipped (all in `anythingllm-upstream/server/utils/GnomeBridge/index.js`):** a layered gate —
+- mtime not advanced → skip.
+- mtime advanced + `nfo:fileSize` DIFFERS → re-summarise (GNOME alone decides, no hash).
+- mtime advanced + size SAME + a stored `contentHash` → **hash-confirm**: SHA-256 of the file bytes; match →
+  no-op churn (refresh mtime/size, NO granite); mismatch/unreadable → re-summarise.
+- mtime advanced + no usable size/hash (legacy entry) → re-summarise = the old mtime-only behavior
+  (migration-safe — no re-summarise storm on first run).
+
+`computeDelta` now returns `{news, changed, maybeChanged, deleted}` and is decided purely from GNOME's
+signals (no file I/O); `runSync` resolves `maybeChanged` via `hashFile(url,size)`. `contentHash` + `size`
+now live on every sync-state entry — computed once at the materialize checkpoint and threaded through the
+embed batch so `flush()`'s `onDocComplete`, the non-native, resume, and dormant paths all PRESERVE them.
+SPARQL (`queryFileList` + `queryBlindSpots`) gained `OPTIONAL nfo:fileSize` + `MAX(?sz)`. SHA-256 via
+built-in `crypto` (no new dep — bottleneck is granite, not the hash). Knob: `GNOME_HASH_MAX_BYTES` (64 MB
+cap; over it the hash is declined → file treated as changed = safe). Hashing is CPU/disk only and *reduces*
+GPU by skipping redundant granite.
+
+**Verified:** `node --check` clean · the new SPARQL runs live against tinysparql (url␟mtime␟size, one row/file)
+· `computeDelta` unit test PASS (new / changed / maybeChanged / deleted + legacy-no-hash→changed +
+size-differs→changed) · server hot-reloaded healthy (ping 200). NOT committed, NOT yet exercised by a real
+sync. **A moved file still re-summarises** — correlating delete+add by hash is option 2 (deferred; design in
+the `hash-change-detection` memory + `reconstructable-index`).
+
+## ⚠️ INCIDENT + RECOVERY + DESIGN DIRECTION (2026-06-27) — the "365/365 → 0/1" folder-repoint wipe
+
+**What the user saw:** the Library count crashed from 365/365 to 0/1.
+
+**Root cause (a UX trap, NOT the rebuild bug):** the gnome-sync index tracks ONE folder per slug. The user
+right-clicked the **Pictures** folder and hit "⟳ index" repeatedly → each run **re-pointed `amadocs-library`
+to `/home/user/Pictures`**, overwriting the corpus state file. The reconcile then queued the old 365 docs for
+delete; `removeDocuments` **timed out at 120s** (which spared the 2080 chunk vectors) but `deleteSummaryVectors`
+completed → **the `__summaries` breadth cards were destroyed (127 → 5 rows)**. The "0/1" was the state-file
+repoint; it only *looked* fully wiped.
+
+**Recovery (this session):** latched global STOP (`POST /system/stop-all`; in-memory `ingestPaused` — clears on
+server restart) to halt granite + cool the box → re-pointed the state file `folder` back to `/home/user`
+(user's chosen broad scope) with an empty `files` map (clean additive rebuild) → user chose to run a full
+re-summarise drain. DryRun confirmed **366 indexed, 0 deletes**. Real run started, batched-flush checkpointing
+per doc, GPU cool (54–58 °C). Cadence auto-continues the remaining ~166 after the 200-cap pass. **Note: ~678
+granite summaries survived on disk in the sidecars** — a fast embed-only rebuild was offered; user chose the
+full from-scratch re-summarise for a clean/consistent index.
+
+**UX fixes shipped (UI-only, UNCOMMITTED, both `index.html` copies byte-identical, scripts vm-parse-clean):**
+1. **Harmonised the per-file right-click** — the confusing split `⚡ analyse with AI` + `✦ summarise` is now ONE
+   primary **"Index & summarise"** (relabels "Re-index & summarise" when already indexed): one handler indexes
+   if needed (`analyseFile` backstop / `deepSearchDoc`) then `summarizeDoc`. Removed the separate item+handler;
+   updated two stale tree hints.
+2. **Folder-index safety confirm** — `onSyncFolder` reads the dryRun `deleted` count and, when `≥5`, pops a
+   `window.confirm` ("indexing X will REMOVE N already-indexed files… switch the index?") so a stray click can't
+   silently wipe the corpus again. ⚠️ Not live until the running Electron renderer reloads.
+
+**DESIGN DIRECTION (user-initiated — make the DB reconstructable + churn-resilient):** treat LanceDB as a
+**disposable cache** rebuilt from durable on-disk sidecars, keyed by a **content hash** (xxh3/BLAKE3):
+- `computeDelta` (currently **mtime-only**, `index.js:466`) gains a hash-confirm stage: mtime+size gate → hash →
+  skip granite when content is unchanged (copy/touch/git-checkout/restore) + dedup by hash. **Move/rename =
+  same hash, new path = cheap pointer update, zero granite** — the biggest win for "large folder changes" on a
+  busy disk.
+- `reconstructFromSidecars(slug)` (generalize the embeds-only `_backfill_summaries.js`) rebuilds chunks +
+  `__summaries` GPU-free in minutes → a wipe/repoint/corrupt-DB becomes a non-event, not a 3-hr re-summarise.
+- Hashing is **CPU/disk only, never GPU**, and *reduces* GPU by skipping redundant granite.
+- High-churn principle: only **genuinely new content** should ever cost time, and even that must be background /
+  throttled / interruptible / **priority-by-recency** so the user is never blocked. Also need: batched/bounded
+  deletes (the 120s-timeout fragility) + debounce for change-storms + aggressive ignore-rules (build dirs,
+  `.git`, node_modules — `/home/user` scope currently sweeps in the project source). NOT BUILT — design captured
+  in agent memory `reconstructable-index`.
+
 ## 🪶 RENAME (2026-06-25) — the project is now **Coracle** (was AMAdocs); branding-only this pass
 
 The GitHub repo was renamed `amadocs` → **`coracle`** and the product adopts the **Coracle theme**:
